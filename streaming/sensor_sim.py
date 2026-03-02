@@ -14,7 +14,7 @@ def generate_sensor_data ():
             " humidity ": random . randint (30 , 80)
         }
     }
-if __name__ == " __main__ ":
+if __name__ == "__main__":
     print (" Demarrage de la simulation ... ")
     while True :
         data = generate_sensor_data ()
