@@ -140,7 +140,7 @@ def backfill_date(**context):
 with DAG(
     dag_id="historical_backfill",
     default_args=DEFAULT_ARGS,
-    description="Backfill historical air quality data from OpenAQ API",
+    description="Backfill historical air quality data from OpenAQ API. ",
     schedule_interval="@daily",
     start_date=datetime(2024, 1, 1),
     end_date=datetime(2024, 3, 31),
