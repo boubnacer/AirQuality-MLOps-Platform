@@ -21,9 +21,9 @@ SELECT
     a.timestamp::date AS report_date,
     COUNT(*) AS total_anomalies,
     COUNT(*) FILTER (WHERE a.severity = 'critical') AS critical_count,
-    COUNT(*) FILTER (WHERE a.severity = 'warning') AS warning_count,
+    COUNT(*) FILTER (WHERE a.severity = 'warning')  AS warning_count,
     COUNT(*) FILTER (WHERE a.anomaly_type = 'rule_based') AS rule_based_count,
-    COUNT(*) FILTER (WHERE a.anomaly_type = 'ml_based') AS ml_based_count
+    COUNT(*) FILTER (WHERE a.anomaly_type = 'ml_based')   AS ml_based_count
 FROM anomalies a
 WHERE a.timestamp >= NOW() - INTERVAL '30 days'
 GROUP BY 1
@@ -37,7 +37,7 @@ WITH hist AS (
         COUNT(*) AS hist_count
     FROM measurements
     WHERE timestamp BETWEEN NOW() - INTERVAL '60 days' AND NOW() - INTERVAL '30 days'
-    AND pm2_5 IS NOT NULL
+      AND pm2_5 IS NOT NULL
     GROUP BY 1
 ),
 recent AS (
@@ -46,16 +46,18 @@ recent AS (
         COUNT(*) AS recent_count
     FROM measurements
     WHERE timestamp >= NOW() - INTERVAL '30 days'
-    AND pm2_5 IS NOT NULL
+      AND pm2_5 IS NOT NULL
     GROUP BY 1
+),
+totals AS (
+    SELECT SUM(hist_count) AS total_hist FROM hist
 ),
 combined AS (
     SELECT
         COALESCE(h.bucket, r.bucket) AS bucket,
-        COALESCE(h.hist_count, 0) AS hist_count,
+        COALESCE(h.hist_count, 0)   AS hist_count,
         COALESCE(r.recent_count, 0) AS recent_count
-    FROM hist h
-    FULL OUTER JOIN recent r ON h.bucket = r.bucket
+    FROM hist h FULL OUTER JOIN recent r ON h.bucket = r.bucket
 )
 SELECT
     bucket,
@@ -64,7 +66,9 @@ SELECT
     CASE
         WHEN hist_count > 0 AND recent_count > 0
         THEN (recent_count::float / NULLIF(SUM(recent_count) OVER (), 0) -
-              hist_count::float / NULLIF(SUM(hist_count) OVER (), 0))
+              hist_count::float  / NULLIF(SUM(hist_count)  OVER (), 0)) *
+             LN(NULLIF(recent_count::float / NULLIF(SUM(recent_count) OVER (), 0), 0) /
+                NULLIF(hist_count::float  / NULLIF(SUM(hist_count)  OVER (), 0), 0))
         ELSE 0
     END AS psi_contribution
 FROM combined
