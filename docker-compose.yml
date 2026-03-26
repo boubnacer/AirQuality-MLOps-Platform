@@ -1,65 +1,323 @@
-version: '3.8'
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+    args:
+      BUILDPLATFORM: linux/arm64
+  platform: linux/arm64
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB}
+    AIRFLOW__CORE__FERNET_KEY: 'FB0o_zt4e3Ziq3LdUUO7F2Z95cvFFx16hU8jTeR1ASM='
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+    KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_DB: ${POSTGRES_DB}
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+    SMTP_PORT: ${SMTP_PORT:-587}
+    SMTP_USER: ${SMTP_USER:-}
+    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./ml:/opt/airflow/ml
+    - ./catalog:/opt/airflow/catalog
+    - ./mlflow-artifacts:/mlflow-artifacts
+    - ./.env:/opt/airflow/.env
+  # user: "${AIRFLOW_UID:-50000}:0"  # Removed to fix AirflowConfigException
+  depends_on:
+    postgres:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
 
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
-    image: confluentinc/cp-kafka:7.4.0
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_RETENTION_HOURS: 168
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic raw_data --partitions 3 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic processed_data --partitions 3 --replication-factor 1 --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic anomalies --partitions 1 --replication-factor 1 --config retention.ms=2592000000
+      echo 'Topics created successfully'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
 
   postgres:
     image: postgres:15
+    container_name: postgres
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow_password
-      POSTGRES_DB: airquality_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./scripts/seed_locations.sql:/docker-entrypoint-initdb.d/02_seed.sql
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${POSTGRES_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${POSTGRES_PASSWORD}
+      MONGO_INITDB_DATABASE: airquality_raw
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.8.1
+    image: python:3.11-slim
+    container_name: mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        pip install mlflow psycopg2-binary boto3 --quiet &&
+        mlflow server \
+          --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow \
+          --default-artifact-root /mlflow-artifacts \
+          --host 0.0.0.0 \
+          --port 5000 \
+          --allowed-hosts '*' \
+          --cors-allowed-origins '*' \
+          --disable-security-middleware
+    volumes:
+      - ./mlflow-artifacts:/mlflow-artifacts
     ports:
       - "5050:5000"
-    command: mlflow server --host 0.0.0.0 --port 5000
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_SERVER_ALLOWED_HOSTS: "*"
+      MLFLOW_SERVER_CORS_ALLOWED_ORIGINS: "*"
+      MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE: "true"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  simulator:
+    build:
+      context: ./streaming/producer
+      dockerfile: Dockerfile
+    container_name: simulator
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SENSOR_COUNT: ${SENSOR_COUNT:-50}
+      EMISSION_INTERVAL_SECONDS: ${EMISSION_INTERVAL_SECONDS:-1}
+    restart: unless-stopped
+
+  etl-consumer:
+    build:
+      context: ./streaming/consumer
+      dockerfile: Dockerfile
+    container_name: etl-consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      MONGO_URI: mongodb://${POSTGRES_USER}:${POSTGRES_PASSWORD}@mongodb:27017/
+    restart: unless-stopped
 
   airflow-webserver:
-    build: 
-      context: .
-      dockerfile: Dockerfile.airflow
-    depends_on:
-      - postgres
-    environment:
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow_password@postgres/airquality_db
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
     ports:
       - "8080:8080"
-    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
   airflow-scheduler:
-    build: 
-      context: .
-      dockerfile: Dockerfile.airflow
-    depends_on:
-      - postgres
-    environment:
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow_password@postgres/airquality_db
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    <<: *airflow-common
+    container_name: airflow-scheduler
     command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username ${AIRFLOW_WWW_USER_USERNAME} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password ${AIRFLOW_WWW_USER_PASSWORD}
+    restart: on-failure
+
+  prediction-api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: prediction-api
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+    volumes:
+      - ./mlflow-artifacts:/mlflow-artifacts
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: ${POSTGRES_USER}
+      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      MB_DB_PORT: 5432
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase-data:/metabase-data
+
+  catalog-api:
+    image: python:3.11-slim
+    container_name: catalog-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "pip install fastapi uvicorn psycopg2-binary pydantic loguru --quiet &&
+               uvicorn catalog.app:app --host 0.0.0.0 --port 8001"
+    volumes:
+      - ./catalog:/app/catalog
+    working_dir: /app
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mongo-data:
+  metabase-data:
