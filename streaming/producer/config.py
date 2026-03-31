@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv ()
-
+ 
 KAFKA_BOOTSTRAP_SERVERS = os. getenv ("KAFKA_BOOTSTRAP_SERVERS","localhost :29092")
 SENSOR_COUNT = int (os. getenv ("SENSOR_COUNT","50"))
 EMISSION_INTERVAL_SECONDS = float (os. getenv ("EMISSION_INTERVAL_SECONDS","1"))
