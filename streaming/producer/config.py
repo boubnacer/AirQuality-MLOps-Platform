@@ -9,7 +9,7 @@ EMISSION_INTERVAL_SECONDS = float (os. getenv ("EMISSION_INTERVAL_SECONDS","1"))
 KAFKA_TOPIC_RAW ="raw_data"
 # Sensor locations (50 sensors across Europe )
 SENSOR_LOCATIONS = [
-    {"sensor_id": f"CAP_ { str(i). zfill (3) }","lat": lat ,"lon": lon ,"city": city ,"zone": zone }
+    {"sensor_id": f"CAP_{str(i).zfill(3)}","lat": lat ,"lon": lon ,"city": city ,"zone": zone }
     for i, (lat , lon , city , zone ) in enumerate ([
         (48.8566 , 2.3522 ,"Paris","urban_background"),
         (48.8606 , 2.3376 ,"Paris","traffic"),
