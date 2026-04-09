@@ -24,7 +24,6 @@ docker-compose.override.yml
 Dockerfile.local
 airflow/
 metabase/
-catalog/
 .claude
 output/
 test-output/
